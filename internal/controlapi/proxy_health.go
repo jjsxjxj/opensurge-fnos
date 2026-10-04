@@ -1,6 +1,7 @@
 package controlapi
 
 import (
+	"math/rand"
 	"net/http"
 	"sort"
 	"strings"
@@ -11,7 +12,16 @@ import (
 	"open-mihomo-gateway/internal/mihomo"
 )
 
-const proxyHealthConcurrency = 6
+// Batch delay probing is throttled the way Clash Verge Rev does it
+// (src/services/delay.ts): a small worker pool plus a randomized stagger so a
+// batch never fires in lockstep, and a minimum pace per measurement. Airports
+// commonly cap concurrent connections per subscription (often 3-5); a burst of
+// 6+ simultaneous probes trips that limit and makes every node look dead.
+const (
+	proxyHealthConcurrency = 3
+	proxyHealthStaggerMax  = 200 * time.Millisecond
+	proxyHealthMinPace     = 500 * time.Millisecond
+)
 
 type ProxyHealthResponse struct {
 	SchemaVersion int                  `json:"schema_version"`
@@ -86,7 +96,16 @@ func (s *Server) handleProxyHealthTests(w http.ResponseWriter, r *http.Request) 
 		go func() {
 			defer workers.Done()
 			for index := range jobs {
+				// Randomized stagger (CVR-style) so concurrent workers never
+				// fire on the same millisecond.
+				time.Sleep(time.Duration(rand.Int63n(int64(proxyHealthStaggerMax) + 1)))
+				start := time.Now()
 				results[index] = s.measureProxyDelay(r.Context(), cfg, names[index], snapshot.TestURL, 5*time.Second)
+				// Minimum pace per measurement: fast probes are padded so the
+				// batch trickles instead of bursting.
+				if elapsed := time.Since(start); elapsed < proxyHealthMinPace {
+					time.Sleep(proxyHealthMinPace - elapsed)
+				}
 			}
 		}()
 	}

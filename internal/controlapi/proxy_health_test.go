@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -57,5 +58,55 @@ func TestProxyHealthTestsRejectUnknownAndNonProbeableNames(t *testing.T) {
 		if response.Code != http.StatusUnprocessableEntity {
 			t.Fatalf("body=%s status=%d response=%s", body, response.Code, response.Body.String())
 		}
+	}
+}
+
+// A batch must never probe more than proxyHealthConcurrency nodes at once:
+// airports cap concurrent connections per subscription and a burst makes every
+// node report unreachable. Modeled on the Clash Verge Rev delay manager.
+func TestProxyHealthTestsThrottleBatchProbing(t *testing.T) {
+	server := newTestServer(t)
+	names := []string{"A", "B", "C", "D", "E", "F", "G", "H"}
+	proxies := make([]mihomo.ProxyHealth, 0, len(names))
+	for _, name := range names {
+		proxies = append(proxies, mihomo.ProxyHealth{Name: name, Type: "Vless", Status: "untested", Probeable: true})
+	}
+	server.fetchProxyHealth = func(context.Context, config.Config) (mihomo.ProxyHealthSnapshot, error) {
+		return mihomo.ProxyHealthSnapshot{TestURL: mihomo.DefaultProxyDelayTestURL, Proxies: proxies}, nil
+	}
+
+	var mu sync.Mutex
+	current, maxConcurrent := 0, 0
+	server.measureProxyDelay = func(_ context.Context, _ config.Config, name, testURL string, _ time.Duration) mihomo.ProxyDelayResult {
+		mu.Lock()
+		current++
+		if current > maxConcurrent {
+			maxConcurrent = current
+		}
+		mu.Unlock()
+		time.Sleep(20 * time.Millisecond)
+		mu.Lock()
+		current--
+		mu.Unlock()
+		return mihomo.ProxyDelayResult{Name: name, Status: "reachable", DelayMS: 50, TestURL: testURL}
+	}
+
+	body, err := json.Marshal(ProxyHealthTestRequest{Names: names})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := performAuthorized(server, http.MethodPost, "/api/v1/proxy-health/tests", body)
+	if response.Code != http.StatusOK {
+		t.Fatalf("POST status=%d body=%s", response.Code, response.Body.String())
+	}
+	var result ProxyHealthTestResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Results) != len(names) {
+		t.Fatalf("results = %d, want %d", len(result.Results), len(names))
+	}
+	if maxConcurrent > proxyHealthConcurrency {
+		t.Fatalf("max concurrent probes = %d, want <= %d", maxConcurrent, proxyHealthConcurrency)
 	}
 }
