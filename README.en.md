@@ -17,7 +17,7 @@
 > This branch ports the OpenSurge Go control plane to **fnOS (Debian 12 based)**,
 > running as a **bypass-router gateway**. Delivery:
 >
-> - Docker image `ghcr.io/jjsxjxj/opensurge-fnos:v0.1.2` (`linux/amd64` + `linux/arm64`)
+> - Docker image `ghcr.io/jjsxjxj/opensurge-fnos:v0.1.3` (`linux/amd64` + `linux/arm64`)
 > - Optional **fnOS App Center `.fpk`** package (recommended for end users)
 >
 > | Audience | Doc |
@@ -27,6 +27,12 @@
 > | Port design | [DESIGN.md](docs/fnos-port/DESIGN.md) |
 >
 > Web GUI (LAN): `http://<NAS-IP>:61767/enter` — use `/enter` to establish a session.
+>
+> **Mainland China networks:** pulling `ghcr.io/...` often fails with
+> `context deadline exceeded` (network reachability, not permissions — the package is
+> public). Workarounds: `docker save` on a machine that can reach ghcr and
+> `docker load` on the NAS, or configure a GHCR registry mirror — see
+> [FPK user guide §9.5](docs/fnos-port/FPK-USER-GUIDE.md).
 >
 > Everything below is largely upstream macOS documentation. **pkg installer, menu
 > bar app, launchd, pf, and networksetup do not apply here** — those artifacts

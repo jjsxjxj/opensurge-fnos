@@ -100,6 +100,10 @@ ghcr.io/jjsxjxj/opensurge-fnos:v0.1.3
 
 package 为 public，一般 **无需登录 ghcr**。
 
+> **大陆网络注意**：`ghcr.io` 直连经常超时，典型报错
+> `Head "https://ghcr.io/v2/...": context deadline exceeded`（**不是**权限问题）。
+> 三种解法见 [§9.5](#95-安装升级时拉取镜像超时context-deadline-exceeded)，最稳的是「离线」方式。
+
 **离线**
 
 在能访问 ghcr 的机器上：
@@ -112,11 +116,15 @@ docker pull --platform linux/amd64 ghcr.io/jjsxjxj/opensurge-fnos:v0.1.3
 docker save ghcr.io/jjsxjxj/opensurge-fnos:v0.1.3 -o opensurge-v0.1.3.tar
 ```
 
-传到 NAS 后：
+传到 NAS（SMB 共享 / `scp`）后：
 
 ```bash
 docker load -i opensurge-v0.1.3.tar
 ```
+
+**离线包要按架构选对**：`docker pull --platform` 与 fpk 的 x86/arm 必须一致，否则
+NAS 上仍然会去联网拉。加载完成后 `docker images | grep opensurge` 应能看到
+`ghcr.io/jjsxjxj/opensurge-fnos:v0.1.3`，再装 fpk 就不会重新下载。
 
 ### 4.2 本地安装 fpk
 
@@ -363,6 +371,57 @@ ss -lnup | grep -E ':53|:61767'
 
 磁盘 `ICON.PNG` 已更新时，属于 **应用中心 UI 缓存**（飞牛已知现象）。  
 强刷 / 无痕 / 重新登录；必要时执行第 6 节图标修复命令。
+
+### 9.5 安装/升级时拉取镜像超时（context deadline exceeded）
+
+现象：应用中心安装/更新时报
+
+```text
+The "DOCKER_MIRROR" variable is not set. Defaulting to a blank string.
+Image ghcr.io/jjsxjxj/opensurge-fnos:v0.1.3 Pulling
+Error response from daemon: Head "https://ghcr.io/v2/.../manifests/v0.1.3":
+Get "https://ghcr.io/token?...": context deadline exceeded
+```
+
+**这不是权限问题**——package 已是 public，是大陆网络到不了 `ghcr.io`。三种解法：
+
+**① 本机拉好再搬进 NAS（最稳）**
+
+在能访问 ghcr 的机器（PC / 另一台 VPS）上：
+
+```bash
+docker pull --platform linux/amd64 ghcr.io/jjsxjxj/opensurge-fnos:v0.1.3
+docker save ghcr.io/jjsxjxj/opensurge-fnos:v0.1.3 -o opensurge-v0.1.3.tar
+```
+
+把 tar 拷到 NAS（SMB 共享文件夹最省事），NAS 上：
+
+```bash
+docker load -i /vol1/<你的共享目录>/opensurge-v0.1.3.tar
+docker images | grep opensurge        # 确认 v0.1.3 已在本地
+```
+
+然后再装/更新 fpk，飞牛看到本地已有该镜像就不会联网拉取。
+
+**② 给飞牛 Docker 配 GHCR 镜像加速**
+
+飞牛「Docker → 设置 → 镜像加速 / registry-mirrors」里加一个支持 GHCR 的镜像站：
+
+```text
+https://ghcr.m.daocloud.io
+https://ghcr.nju.edu.cn
+```
+
+配好后重新安装：fpk 的 compose 已经预留 `${DOCKER_MIRROR}` 前缀，飞牛会把镜像地址
+重写成 `<镜像站>/jjsxjxj/opensurge-fnos:v0.1.3`。
+
+**③ 换 DNS + 重试**
+
+把 NAS 的 DNS 改成 `223.5.5.5` / `119.29.29.29` 后重试。ghcr.io 偶发抽风，
+隔几分钟重试也可能直接成功。
+
+> 判断是否已成功：`docker images` 里出现
+> `ghcr.io/jjsxjxj/opensurge-fnos:v0.1.3` 即算拉取完成。
 
 ---
 

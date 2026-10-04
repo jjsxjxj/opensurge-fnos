@@ -127,6 +127,12 @@ compose 需监听 `0.0.0.0`，且配置中 `gateway.lan_ip`（或环境变量
 **`ip_forward` 写入失败** —— compose 里少了 `cap_add: SYS_ADMIN`，或者 fnOS 的 Docker
 版本不允许 remount。容器日志会直接打出提示。
 
+**NAS 上 `docker pull` 报 `context deadline exceeded`** —— 大陆网络到不了 `ghcr.io`，
+不是权限问题（package 是 public）。最稳的做法：在能访问 ghcr 的机器上
+`docker pull` + `docker save`，把 tar 拷到 NAS 后 `docker load`；也可以给飞牛 Docker
+配 GHCR 镜像加速（`ghcr.m.daocloud.io`、`ghcr.nju.edu.cn`）。完整步骤见
+[FPK-USER-GUIDE.md §9.5](./FPK-USER-GUIDE.md)。
+
 **dnsmasq 起不来 / 53 端口被占** —— fnOS 自己可能有 DNS 服务占着 `0.0.0.0:53`。
 本项目的 dnsmasq 用 `bind-interfaces` 只绑 `dns.listen` 那一个 IP，正常不冲突；
 真冲突了先 `ss -lnup | grep :53` 看是谁占的。

@@ -67,10 +67,15 @@ forwarding 提供原生网关路径。
 **普通用户：飞牛应用中心本地安装 `.fpk` 包**
 
 1. 从 [GitHub Releases](https://github.com/jjsxjxj/opensurge-fnos/releases/latest) 下载安装包  
-   - x86：`opensurge_0.1.2_x86.fpk`  
-   - ARM：`opensurge_0.1.2_arm.fpk`
+   - x86：`opensurge_0.1.3_x86.fpk`  
+   - ARM：`opensurge_0.1.3_arm.fpk`
 2. 应用中心 → 本地安装 → 按向导填端口 / 网卡 / 局域网 IP
 3. 启动应用后浏览器打开：`http://<NAS-IP>:61767/enter`
+
+> **大陆网络提示**：安装时若卡在拉取 `ghcr.io/...` 并报 `context deadline exceeded`，
+> 属于网络可达性问题（package 已是 public）。可在能访问 ghcr 的机器上
+> `docker save` 后用 `docker load` 导入，或给飞牛 Docker 配 GHCR 镜像加速——见
+> [手册 §9.5](docs/fnos-port/FPK-USER-GUIDE.md#95-安装升级时拉取镜像超时context-deadline-exceeded)。
 
 完整步骤、客户端设置、故障排查见  
 **[飞牛应用中心安装使用手册](docs/fnos-port/FPK-USER-GUIDE.md)**。
@@ -159,8 +164,8 @@ make control-build
 
 交付走 Docker 镜像 + 可选 fpk 包装：
 
-- 镜像：`ghcr.io/jjsxjxj/opensurge-fnos:v0.1.2`（多架构）
-- 推镜像：`make docker-push-multiarch VERSION=v0.1.2`（调试用 `make docker-push-dev`）
+- 镜像：`ghcr.io/jjsxjxj/opensurge-fnos:v0.1.3`（多架构）
+- 推镜像：`make docker-push-multiarch VERSION=v0.1.3`（调试用 `make docker-push-dev`）
 - 用户安装：见 [飞牛应用中心安装手册](docs/fnos-port/FPK-USER-GUIDE.md)
 - Compose 手工部署：见 [Docker 部署指南](docs/fnos-port/DEPLOY.md)
 
