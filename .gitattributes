@@ -1,0 +1,4 @@
+# Windows / macOS 检出时 shell 脚本必须保持 LF，否则 Git Bash 执行报
+# "bad interpreter: ^M"，fpk 打包脚本（build.sh / build-fpk.sh）在贡献者的
+# Windows 机器上会直接跑不起来。
+*.sh text eol=lf

@@ -1,0 +1,138 @@
+name: Docker & fpk
+
+# 构建 ghcr.io/jjsxjxj/opensurge-fnos 多架构镜像（amd64 + arm64）并产出飞牛 fpk。
+# 版本号唯一来源是 packaging/fnos/fnos/manifest 的 version，镜像 tag = v + 该数字。
+#
+# 触发：
+#   - push 到 main：跑测试 → 推 v<version> 与 latest 镜像 → fpk 上传为 workflow 产物
+#   - push tag v*：同上，并把两个 fpk 挂到对应 GitHub Release
+#   - workflow_dispatch：手动全流程（镜像额外打 dev tag）
+#
+# fpk 内嵌的 compose 通过 IMAGE_REPO 指向本仓库自己的 GHCR 镜像；
+# GHCR 首次推送后镜像默认是 private，去 package 设置页改成 public 即可拉取。
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+env:
+  IMAGE_REPO: ghcr.io/jjsxjxj/opensurge-fnos
+
+jobs:
+  test:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run unit tests
+        run: go test ./...
+
+  image:
+    name: Multi-arch image
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Read version from fnos manifest
+        id: version
+        run: |
+          version="$(grep -E '^version[[:space:]]*=' packaging/fnos/fnos/manifest | head -1 | sed 's/.*=[[:space:]]*//' | tr -d '[:space:]')"
+          if [ -z "${version}" ]; then
+            echo "version not found in packaging/fnos/fnos/manifest" >&2
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image tags
+        id: tags
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          tags="${IMAGE_REPO}:v${VERSION},${IMAGE_REPO}:latest"
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            tags="${tags},${IMAGE_REPO}:dev"
+          fi
+          echo "tags=${tags}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  fpk:
+    name: fnOS fpk
+    needs: image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build app.tgz and both fpk packages
+        env:
+          IMAGE_REPO: ${{ env.IMAGE_REPO }}
+        run: |
+          cd packaging/fnos
+          ./scripts/build.sh
+          ./build-fpk.sh all
+
+      - name: Verify fpk points at this repository's image
+        env:
+          VERSION: ${{ needs.image.outputs.version }}
+        run: |
+          work="$(mktemp -d)"
+          tar xzf packaging/fnos/app.tgz -C "${work}"
+          grep -F "image: \${DOCKER_MIRROR}${IMAGE_REPO}:v${VERSION}" "${work}/docker/docker-compose.yaml"
+          echo "fpk compose -> ${IMAGE_REPO}:v${VERSION}"
+
+      - name: Upload fpk artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: fpk
+          if-no-files-found: error
+          path: |
+            packaging/fnos/*.fpk
+
+      - name: Attach fpk to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            packaging/fnos/*.fpk
+          fail_on_unmatched_files: true

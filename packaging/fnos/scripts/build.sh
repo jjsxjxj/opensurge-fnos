@@ -13,6 +13,10 @@ if [ -z "${VERSION:-}" ] && [ -f "${PKG_DIR}/fnos/manifest" ]; then
 fi
 VERSION="${VERSION:-0.1.1}"
 
+# 镜像仓库可覆盖：fork 构建的 fpk 必须指向 fork 自己的镜像，否则装到 NAS 上的
+# 还是上游镜像（不包含 fork 的改动）。${DOCKER_MIRROR} / ${TRIM_*} 仍留给 fnOS。
+IMAGE_REPO="${IMAGE_REPO:-ghcr.io/funchs/opensurge-fnos}"
+
 WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "${WORK_DIR}"' EXIT
 
@@ -20,13 +24,19 @@ mkdir -p "${WORK_DIR}/docker"
 cp "${PKG_DIR}/fnos/docker/docker-compose.yaml" "${WORK_DIR}/docker/"
 cp "${PKG_DIR}/fnos/docker/config.fnos.example.yaml" "${WORK_DIR}/docker/"
 
-# 只替换 ${VERSION}。${DOCKER_MIRROR} / ${TRIM_PKGVAR} / ${TRIM_SERVICE_PORT}
+# 先换镜像仓库，再替换 ${VERSION}。${DOCKER_MIRROR} / ${TRIM_PKGVAR} / ${TRIM_SERVICE_PORT}
 # 必须原样留给 fnOS。
+sed -i.bak "s|ghcr\.io/funchs/opensurge-fnos|${IMAGE_REPO}|g" "${WORK_DIR}/docker/docker-compose.yaml"
+rm -f "${WORK_DIR}/docker/docker-compose.yaml.bak"
 sed -i.bak "s|\${VERSION}|${VERSION}|g" "${WORK_DIR}/docker/docker-compose.yaml"
 rm -f "${WORK_DIR}/docker/docker-compose.yaml.bak"
 
 if grep -q '\${VERSION}' "${WORK_DIR}/docker/docker-compose.yaml"; then
     echo "Error: \${VERSION} substitution failed" >&2
+    exit 1
+fi
+if ! grep -qF "image: \${DOCKER_MIRROR}${IMAGE_REPO}:v${VERSION}" "${WORK_DIR}/docker/docker-compose.yaml"; then
+    echo "Error: image reference does not point at ${IMAGE_REPO}:v${VERSION}" >&2
     exit 1
 fi
 for keep in 'DOCKER_MIRROR' 'TRIM_PKGVAR' 'TRIM_SERVICE_PORT'; do

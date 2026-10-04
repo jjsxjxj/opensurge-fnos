@@ -149,14 +149,18 @@ for PLATFORM in ${PLATFORMS}; do
     )
     rm -rf "${BUILD_DIR}"
 
-    # 校验：包内不得含 AppleDouble，且 ICON 存在
-    if tar tzf "${SCRIPT_DIR}/${FPK_NAME}" | grep -E '(^|/)\._' >/dev/null; then
+    # 校验：包内不得含 AppleDouble，且 ICON 存在。
+    # 清单先整体读到变量再 grep：grep -q 命中即退出会让上游 tar 收到 SIGPIPE(141)，
+    # 配合 set -o pipefail 把整条管道误判为失败——macOS/Linux 的 64KB 管道缓冲
+    # 下整个清单一次写完不会触发，Windows Git Bash(MSYS2) 的小管道缓冲则必现。
+    listing="$(tar tzf "${SCRIPT_DIR}/${FPK_NAME}")"
+    if grep -Eq '(^|/)\._' <<<"${listing}"; then
         echo "Error: fpk still contains AppleDouble ._* entries" >&2
         exit 1
     fi
-    tar tzf "${SCRIPT_DIR}/${FPK_NAME}" | grep -qx 'ICON.PNG' \
+    grep -qx 'ICON.PNG' <<<"${listing}" \
         || { echo "Error: ICON.PNG missing or wrong path in fpk" >&2; exit 1; }
-    tar tzf "${SCRIPT_DIR}/${FPK_NAME}" | grep -qx 'ICON_256.PNG' \
+    grep -qx 'ICON_256.PNG' <<<"${listing}" \
         || { echo "Error: ICON_256.PNG missing or wrong path in fpk" >&2; exit 1; }
 
     echo "✓ Package created: ${FPK_NAME} ($(du -h "${SCRIPT_DIR}/${FPK_NAME}" | cut -f1))"
