@@ -32,6 +32,18 @@ if [ ! -f "app.tgz" ]; then
     exit 1
 fi
 
+# 防呆：app.tgz 里的镜像 tag 必须与 manifest 版本一致。
+# build-fpk.sh 只打包现成的 app.tgz、不会重新生成；忘了先跑 scripts/build.sh
+# 就会把旧版本镜像打进新版本 fpk（本地曾实际踩中）。
+# 清单先读到变量再 grep：避免 MSYS2 小管道缓冲下 grep 早退触发 tar SIGPIPE。
+compose_yaml="$(tar xzOf app.tgz docker/docker-compose.yaml)"
+tgz_image="$(sed -n 's/^[[:space:]]*image:[[:space:]]*//p' <<<"${compose_yaml}" | head -1)"
+if [[ "${tgz_image}" != *":v${VERSION}" ]]; then
+    echo "Error: app.tgz image is '${tgz_image}' but manifest version is ${VERSION}." >&2
+    echo "       Run IMAGE_REPO=<repo> bash scripts/build.sh first." >&2
+    exit 1
+fi
+
 for required in \
     fnos/ICON.PNG \
     fnos/ICON_256.PNG \
