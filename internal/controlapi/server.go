@@ -369,6 +369,9 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/sources", s.auth(http.HandlerFunc(s.handleSources)))
 	mux.Handle("POST /api/v1/sources/{id}/refresh", s.auth(http.HandlerFunc(s.handleSourceRefresh)))
 	mux.Handle("POST /api/v1/sources/{id}/apply", s.auth(http.HandlerFunc(s.handleSourceApply)))
+	mux.Handle("GET /api/v1/sources/{id}/edit", s.auth(http.HandlerFunc(s.handleSourceEdit)))
+	mux.Handle("PUT /api/v1/sources/{id}", s.auth(http.HandlerFunc(s.handleSourceUpdate)))
+	mux.Handle("DELETE /api/v1/sources/{id}", s.auth(http.HandlerFunc(s.handleSourceDelete)))
 	mux.Handle("GET /api/v1/device-policy", s.auth(http.HandlerFunc(s.handleDevicePolicy)))
 	mux.Handle("PUT /api/v1/device-policy", s.auth(http.HandlerFunc(s.handleDevicePolicy)))
 	mux.Handle("GET /api/v1/devices", s.auth(http.HandlerFunc(s.handleDevices)))
@@ -1597,6 +1600,133 @@ func (s *Server) handleSourceApply(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, source)
 }
 
+// handleSourceEdit returns the editable form of one source: its current name,
+// its saved subscription link, and the stored document text. The list endpoint
+// redacts the link on purpose, so the editor asks for it here and only for the
+// single source being edited.
+func (s *Server) handleSourceEdit(w http.ResponseWriter, r *http.Request) {
+	source, err := s.sourceByID(r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, "source_not_found", err.Error())
+		return
+	}
+	document, err := s.sourceDocument(source)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "source_document_unavailable", err.Error())
+		return
+	}
+	edit := SourceEditDocument{
+		SchemaVersion: SchemaVersion,
+		ID:            source.ID,
+		Name:          source.Name,
+		Kind:          source.Kind,
+		Origin:        source.Origin,
+		Digest:        source.Digest,
+		Document:      document,
+	}
+	if fetchURL, credentialErr := s.credentials.Get(r.Context(), source.ID); credentialErr == nil && strings.HasPrefix(fetchURL, "https://") {
+		edit.URL = fetchURL
+	}
+	writeJSON(w, http.StatusOK, edit)
+}
+
+// handleSourceUpdate edits an existing source in place. The record keeps its ID
+// so that its version history and desired/applied state survive a rename, and so
+// that changing the subscription does not append a second library entry.
+func (s *Server) handleSourceUpdate(w http.ResponseWriter, r *http.Request) {
+	source, err := s.sourceByID(r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, "source_not_found", err.Error())
+		return
+	}
+	// The body can carry a whole document, so the limit also covers the JSON
+	// escaping of a maximum-size profile.
+	var req SourceUpdateRequest
+	if err := decodeJSON(r, &req, 4*maxSourceSize); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		name = source.Name
+	}
+	savedURL := ""
+	if fetchURL, credentialErr := s.credentials.Get(r.Context(), source.ID); credentialErr == nil && strings.HasPrefix(fetchURL, "https://") {
+		savedURL = fetchURL
+	}
+	requestedURL := strings.TrimSpace(req.URL)
+
+	switch {
+	case requestedURL != "" && requestedURL != savedURL:
+		updated, err := s.importURLInto(r.Context(), source.ID, SourceImportRequest{Name: name, Kind: source.Kind, URL: requestedURL})
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "source_update_failed", err.Error())
+			return
+		}
+		source = updated
+	case strings.TrimSpace(req.Document) != "":
+		updated, err := s.importReaderWithID(source.ID, name, source.Kind, source.Origin, strings.NewReader(req.Document))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "source_update_failed", err.Error())
+			return
+		}
+		source = updated
+	default:
+		if err := s.renameSource(source.ID, name); err != nil {
+			writeError(w, http.StatusInternalServerError, "source_update_failed", err.Error())
+			return
+		}
+	}
+	updated, err := s.decoratedSourceByID(source.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "source_update_failed", err.Error())
+		return
+	}
+	updated.SnapshotPath = ""
+	updated.FetchURL = ""
+	writeJSON(w, http.StatusOK, updated)
+}
+
+// handleSourceDelete removes a source from the library. The applied source is
+// refused: its profile is a separate copy, so deleting the record would not break
+// the gateway, but it would drop the only library entry explaining where the
+// running configuration came from. Stopping the gateway clears the applied
+// marker, which is the supported path.
+func (s *Server) handleSourceDelete(w http.ResponseWriter, r *http.Request) {
+	source, err := s.sourceByID(r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, "source_not_found", err.Error())
+		return
+	}
+	sources, err := s.store.Sources()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "sources_failed", err.Error())
+		return
+	}
+	for _, candidate := range s.decorateSourceStates(sources) {
+		if candidate.ID == source.ID && candidate.Applied {
+			writeError(w, http.StatusConflict, "source_in_use", "the applied source cannot be deleted; stop the gateway first")
+			return
+		}
+	}
+	if err := s.deleteSource(r.Context(), source); err != nil {
+		if errors.Is(err, errSourceNotRemoved) {
+			writeError(w, http.StatusInternalServerError, "source_delete_failed", err.Error())
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "source_delete_incomplete", "the source was removed, but leftover files could not be fully cleaned up: "+err.Error())
+		return
+	}
+	remaining, err := s.store.Sources()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "sources_failed", err.Error())
+		return
+	}
+	revision := fileDigest(s.configPath)
+	w.Header().Set("ETag", `"`+revision+`"`)
+	writeJSON(w, http.StatusOK, map[string]any{"schema_version": SchemaVersion, "revision": revision, "sources": publicSources(s.decorateSourceStates(remaining))})
+}
+
 func (s *Server) handleDevicePolicy(w http.ResponseWriter, r *http.Request) {
 	cfg, err := config.LoadRuntime(s.configPath)
 	if err != nil || cfg.DevicePolicy.File == "" {
@@ -2000,6 +2130,21 @@ func (s *Server) sourceByID(id string) (Source, error) {
 	for _, source := range sources {
 		if source.ID == id {
 			return source, nil
+		}
+	}
+	return Source{}, fmt.Errorf("source %q not found", id)
+}
+
+// decoratedSourceByID returns a stored source with its desired/applied markers
+// resolved, which is the shape the list endpoint and the edit responses use.
+func (s *Server) decoratedSourceByID(id string) (Source, error) {
+	sources, err := s.store.Sources()
+	if err != nil {
+		return Source{}, err
+	}
+	for _, candidate := range s.decorateSourceStates(sources) {
+		if candidate.ID == id {
+			return candidate, nil
 		}
 	}
 	return Source{}, fmt.Errorf("source %q not found", id)

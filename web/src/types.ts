@@ -110,6 +110,20 @@ export type Source = {
   }
 }
 
+// SourceEditDocument is the editable form of a source. url is present only for
+// sources imported from an HTTPS subscription, because the source list redacts
+// the stored link.
+export type SourceEditDocument = {
+  schema_version: number
+  id: string
+  name: string
+  kind: string
+  origin: string
+  digest: string
+  url?: string
+  document: string
+}
+
 export type DeviceEgressMode = 'inherit_global' | 'dedicated'
 export type AppliedDeviceEgressMode = DeviceEgressMode | 'legacy_fallback'
 export type CompiledDevice = { id: string; mac: string; ipv4: string; profile: string; egress_mode?: AppliedDeviceEgressMode | ''; groups: Record<string, string> }

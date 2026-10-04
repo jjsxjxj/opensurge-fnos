@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -28,7 +29,16 @@ const (
 	sourceUserAgent = "clash.meta"
 )
 
+// importURL fetches an HTTPS subscription and stores it as a new draft. The
+// identity is derived from the request name and origin.
 func (s *Server) importURL(ctx context.Context, req SourceImportRequest) (Source, error) {
+	return s.importURLInto(ctx, sourceID(req.Name, redactURL(req.URL)), req)
+}
+
+// importURLInto is importURL with an explicit source identity. Reusing the
+// existing ID lets an edit replace a source's subscription in place instead of
+// appending a second library entry for the same profile.
+func (s *Server) importURLInto(ctx context.Context, id string, req SourceImportRequest) (Source, error) {
 	parsed, err := url.Parse(req.URL)
 	if err != nil || parsed.Scheme != "https" || parsed.Host == "" {
 		return Source{}, fmt.Errorf("source URL must be an absolute HTTPS URL")
@@ -59,13 +69,18 @@ func (s *Server) importURL(ctx context.Context, req SourceImportRequest) (Source
 		return Source{}, fmt.Errorf("source returned %s", resp.Status)
 	}
 	before, _ := s.store.Sources()
-	source, err := s.importReader(req.Name, req.Kind, redactURL(req.URL), io.LimitReader(resp.Body, maxSourceSize+1))
+	source, err := s.importReaderWithID(id, req.Name, req.Kind, redactURL(req.URL), io.LimitReader(resp.Body, maxSourceSize+1))
 	if err != nil {
 		return Source{}, err
 	}
 	if err := s.credentials.Put(ctx, source.ID, req.URL); err != nil {
 		_ = s.store.SaveSources(before)
-		_ = os.Remove(source.SnapshotPath)
+		// Only drop the snapshot this call created. A re-import that produced the
+		// same digest reuses the file the restored record still points at, so
+		// removing it unconditionally would strand that record.
+		if !snapshotReferenced(before, source.SnapshotPath) {
+			_ = os.Remove(source.SnapshotPath)
+		}
 		return Source{}, err
 	}
 	return source, nil
@@ -112,7 +127,24 @@ func redactURL(value string) string {
 	return parsed.String()
 }
 
+// sourceID derives the stable identity of an imported source from its name and
+// origin. A fresh import of the same name/origin pair resolves to the same
+// record, which is how repeated imports of one subscription accumulate versions
+// instead of duplicating library entries.
+func sourceID(name, origin string) string {
+	sum := sha256.Sum256([]byte(name + "\x00" + origin))
+	return hex.EncodeToString(sum[:8])
+}
+
 func (s *Server) importReader(name, kind, origin string, reader io.Reader) (Source, error) {
+	return s.importReaderWithID(sourceID(name, origin), name, kind, origin, reader)
+}
+
+// importReaderWithID stores a document under an explicit source identity. Edits
+// pass the existing ID so that renaming a source or replacing its content stays
+// an in-place update: the record keeps its version history and its
+// desired/applied state instead of being recreated as a second entry.
+func (s *Server) importReaderWithID(id, name, kind, origin string, reader io.Reader) (Source, error) {
 	if strings.TrimSpace(name) == "" {
 		name = "Imported profile"
 	}
@@ -140,8 +172,6 @@ func (s *Server) importReader(name, kind, origin string, reader io.Reader) (Sour
 	}
 	digestBytes := sha256.Sum256(data)
 	digest := hex.EncodeToString(digestBytes[:])
-	idBytes := sha256.Sum256([]byte(name + "\x00" + origin))
-	id := hex.EncodeToString(idBytes[:8])
 	dir := filepath.Join(s.store.Dir(), "sources", id)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return Source{}, err
@@ -380,4 +410,122 @@ func mappingKeys(node *yaml.Node) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// sourceSnapshotPaths lists every snapshot file a record owns. The current
+// document and all retained versions live side by side in one per-source
+// directory.
+func sourceSnapshotPaths(source Source) []string {
+	paths := []string{}
+	seen := map[string]bool{}
+	appendPath := func(path string) {
+		if path == "" || seen[path] {
+			return
+		}
+		seen[path] = true
+		paths = append(paths, path)
+	}
+	appendPath(source.SnapshotPath)
+	for _, version := range source.Versions {
+		appendPath(version.SnapshotPath)
+	}
+	return paths
+}
+
+func snapshotReferenced(sources []Source, path string) bool {
+	if path == "" {
+		return false
+	}
+	for _, source := range sources {
+		for _, candidate := range sourceSnapshotPaths(source) {
+			if candidate == path {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// sourceDocument returns the stored document text so the Web UI can offer it for
+// editing.
+func (s *Server) sourceDocument(source Source) (string, error) {
+	if source.SnapshotPath == "" {
+		return "", fmt.Errorf("source %q has no stored document", source.ID)
+	}
+	data, err := os.ReadFile(source.SnapshotPath)
+	if err != nil {
+		return "", fmt.Errorf("read source document: %w", err)
+	}
+	return string(data), nil
+}
+
+// renameSource changes the display name of an existing record. The ID is left
+// untouched on purpose: it names the snapshot directory and keys the stored
+// subscription credential, so rewriting it would orphan both. The trade-off is
+// that a later import of the same subscription under the new name derives a
+// different ID and therefore creates a separate entry.
+func (s *Server) renameSource(id, name string) error {
+	sources, err := s.store.Sources()
+	if err != nil {
+		return err
+	}
+	for i := range sources {
+		if sources[i].ID == id {
+			sources[i].Name = name
+			return s.store.SaveSources(sources)
+		}
+	}
+	return fmt.Errorf("source %q not found", id)
+}
+
+// errSourceNotRemoved marks the failure of the authoritative step of a delete.
+// The caller uses it to tell "nothing happened" apart from "the record is gone
+// but leftover files remain", which need different messages.
+var errSourceNotRemoved = errors.New("source record could not be removed")
+
+// deleteSource removes a record together with the snapshots it owns and the
+// saved subscription credential. The profile the gateway actually runs is a
+// separate copy under data/imported-profile-*.yaml, so removing a source never
+// takes the running configuration's profile away. The handlers still refuse to
+// delete the applied source so the library cannot silently lose the origin of
+// what is currently running.
+func (s *Server) deleteSource(ctx context.Context, source Source) error {
+	sources, err := s.store.Sources()
+	if err != nil {
+		return fmt.Errorf("%w: %v", errSourceNotRemoved, err)
+	}
+	remaining := make([]Source, 0, len(sources))
+	for _, candidate := range sources {
+		if candidate.ID != source.ID {
+			remaining = append(remaining, candidate)
+		}
+	}
+	// The record removal is the visible part of a delete, so it is committed
+	// first: a cleanup failure below must not resurrect an entry the operator
+	// has already removed from the library.
+	if err := s.store.SaveSources(remaining); err != nil {
+		return fmt.Errorf("%w: %v", errSourceNotRemoved, err)
+	}
+	failures := []error{}
+	if err := s.credentials.Delete(ctx, source.ID); err != nil {
+		failures = append(failures, fmt.Errorf("delete saved subscription link: %w", err))
+	}
+	for _, path := range sourceSnapshotPaths(source) {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			failures = append(failures, fmt.Errorf("delete snapshot %s: %w", filepath.Base(path), err))
+		}
+	}
+	// Snapshots of one source share a directory, so dropping it also removes any
+	// file the per-path loop above could not name. The guard keeps a malformed
+	// record from turning into a recursive delete outside the per-source area
+	// under "sources".
+	if source.SnapshotPath != "" {
+		dir := filepath.Dir(source.SnapshotPath)
+		if filepath.Base(filepath.Dir(dir)) == "sources" {
+			if err := os.RemoveAll(dir); err != nil {
+				failures = append(failures, fmt.Errorf("delete snapshot directory: %w", err))
+			}
+		}
+	}
+	return errors.Join(failures...)
 }

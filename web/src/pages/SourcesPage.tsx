@@ -5,8 +5,13 @@ import type { Overview, Source } from '../types'
 
 type SourceAction =
   | { kind: 'import-url' | 'import-file' | 'apply'; sourceID?: string }
-  | { kind: 'refresh'; sourceID: string }
+  | { kind: 'refresh' | 'edit' | 'save' | 'delete'; sourceID: string }
   | null
+
+// SourceBaseline remembers what the editor loaded, so saving only sends the
+// fields the operator actually changed. Sending an untouched document back would
+// re-normalize line endings and create a meaningless new version.
+type SourceBaseline = { url: string; document: string }
 
 export function SourcesPage({ overview, onChanged }: { overview: Overview | null; onChanged: () => void | Promise<void> }) {
   const [sources, setSources] = useState<Source[]>([])
@@ -17,6 +22,12 @@ export function SourcesPage({ overview, onChanged }: { overview: Overview | null
   const [message, setMessage] = useState('')
   const [activeAction, setActiveAction] = useState<SourceAction>(null)
   const [pending, setPending] = useState<Source | null>(null)
+  const [editing, setEditing] = useState<Source | null>(null)
+  const [baseline, setBaseline] = useState<SourceBaseline | null>(null)
+  const [editName, setEditName] = useState('')
+  const [editURL, setEditURL] = useState('')
+  const [editDocument, setEditDocument] = useState('')
+  const [deleting, setDeleting] = useState<Source | null>(null)
   const running = overview?.status.gateway === 'running'
   const busy = activeAction !== null
 
@@ -72,6 +83,93 @@ export function SourcesPage({ overview, onChanged }: { overview: Overview | null
     }
   }
 
+  const openEdit = async (source: Source) => {
+    setActiveAction({ kind: 'edit', sourceID: source.id })
+    setError('')
+    setMessage('')
+    try {
+      const document = await api.sourceEdit(source.id)
+      setEditing(source)
+      setBaseline({ url: document.url ?? '', document: document.document })
+      setEditName(document.name)
+      setEditURL(document.url ?? '')
+      setEditDocument(document.document)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      setActiveAction(null)
+    }
+  }
+
+  const closeEdit = () => {
+    setEditing(null)
+    setBaseline(null)
+    setEditName('')
+    setEditURL('')
+    setEditDocument('')
+  }
+
+  const saveEdit = async () => {
+    if (!editing || !baseline) return
+    const selected = editing
+    const nextName = editName.trim()
+    if (!nextName) {
+      setError('来源名称不能为空。')
+      return
+    }
+    const nextURL = editURL.trim()
+    if (baseline.url && !nextURL) {
+      setError('订阅地址不能为空；如需改为本地来源，请重新导入本地 YAML。')
+      return
+    }
+    const payload: { name: string; url?: string; document?: string } = { name: nextName }
+    if (nextURL !== baseline.url) payload.url = nextURL
+    if (editDocument !== baseline.document) payload.document = editDocument
+    if (payload.url === undefined && payload.document === undefined && nextName === selected.name) {
+      closeEdit()
+      setMessage('没有需要保存的修改。')
+      return
+    }
+    setActiveAction({ kind: 'save', sourceID: selected.id })
+    setError('')
+    setMessage('')
+    try {
+      await api.updateSource(selected.id, payload)
+      closeEdit()
+      await refresh()
+      setMessage(`${nextName} 已保存；新内容成为草稿，仍需校验与应用才会生效。`)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      setActiveAction(null)
+    }
+  }
+
+  const removeSource = async () => {
+    if (!deleting) return
+    const selected = deleting
+    setActiveAction({ kind: 'delete', sourceID: selected.id })
+    setError('')
+    setMessage('')
+    try {
+      await api.deleteSource(selected.id)
+      setDeleting(null)
+      setMessage(`${selected.name} 已删除，快照文件与保存的订阅链接已一并清理。`)
+      await refresh()
+      await Promise.resolve(onChanged())
+    } catch (cause) {
+      const failure = cause instanceof Error ? cause.message : String(cause)
+      // A delete can fail after the record was already removed (leftover files)
+      // or because the source is the running version. Reload so the list always
+      // shows what the server holds, then report the reason: a successful reload
+      // clears the error channel.
+      await refresh()
+      setError(failure)
+    } finally {
+      setActiveAction(null)
+    }
+  }
+
   return <>
     <PageHeader eyebrow="SOURCES" title="代理与规则源" description="导入、校验、应用各自有明确状态；运行配置只会在完整校验成功后切换。" />
     <div className="source-feedback" aria-live="polite">
@@ -118,6 +216,7 @@ export function SourcesPage({ overview, onChanged }: { overview: Overview | null
         const state = source.applied ? '运行版本' : source.desired ? running ? '待重载' : '下次启动版本' : previousApplied ? '新草稿' : source.valid ? '结构有效' : '无效'
         const action = source.applied ? '已运行' : source.desired ? running ? '应用并重载网关' : '等待下次启动' : running ? '校验、应用并重载' : '设为下次启动版本'
         const refreshing = activeAction?.kind === 'refresh' && activeAction.sourceID === source.id
+        const opening = activeAction?.kind === 'edit' && activeAction.sourceID === source.id
         return <article className="source-card" key={source.id}>
           <div className="source-head"><div><small>{source.kind}</small><h3>{source.name}</h3></div><span className={source.applied ? 'pill ok' : source.desired ? 'pill' : source.valid ? 'pill ok' : 'pill bad'}>{state}</span></div>
           <p className="source-origin" title={origin}><span aria-hidden="true">⌁</span>{origin}</p>
@@ -132,6 +231,8 @@ export function SourcesPage({ overview, onChanged }: { overview: Overview | null
           {versions.length > 0 && <small className="source-history">历史：{versions.slice(-3).map(version => `${version.digest.slice(0, 8)}${version.applied ? ' (运行)' : version.desired ? ' (待应用)' : ''}`).join(' · ')}</small>}
           <div className="source-actions">
             {origin.startsWith('https://') && <button type="button" disabled={busy} onClick={() => void run({ kind: 'refresh', sourceID: source.id }, () => api.refreshSource(source.id), `${source.name} 已刷新；新内容已保存为草稿。`)}><ActionLabel active={refreshing} idle="刷新草稿" pending="正在刷新…" /></button>}
+            <button type="button" disabled={busy} onClick={() => void openEdit(source)}><ActionLabel active={opening} idle="编辑" pending="正在读取…" /></button>
+            <button className="danger" type="button" disabled={busy} onClick={() => { setDeleting(source); setError(''); setMessage('') }}>删除</button>
             <button className="primary" type="button" disabled={busy || !revision || !source.valid || source.applied || (source.desired && !running)} onClick={() => openApply(source)}>{action}</button>
           </div>
         </article>
@@ -142,6 +243,36 @@ export function SourcesPage({ overview, onChanged }: { overview: Overview | null
       <p>{running ? 'OpenSurge 会先验证完整候选配置，再短暂重启 DHCP/DNS、mihomo、PF 与 IPv4 forwarding。只有重载成功后才会标记为运行版本。' : '当前网关未运行。订阅会保存为 desired 配置，并在下次启动成功后成为运行版本。'}</p>
       {running && <ul><li>当前连接会中断并重新建立。</li><li>验证失败不会停止现有网关。</li><li>重载失败会恢复旧配置，并尽力恢复原网关。</li></ul>}
       <div className="dialog-actions"><button type="button" disabled={busy} onClick={() => setPending(null)}>取消</button><button className="primary" type="button" autoFocus disabled={busy} onClick={() => void apply()}><ActionLabel active={activeAction?.kind === 'apply'} idle={running ? '确认应用并重载' : '确认设为下次启动版本'} pending="正在验证并应用…" /></button></div>
+    </dialog>}
+    {editing && <dialog className="reload-dialog source-edit-dialog" open aria-modal="true" aria-labelledby="source-edit-title">
+      <h2 id="source-edit-title">编辑配置来源</h2>
+      <p>保存只产生新草稿：不会立即改变正在运行的 DHCP、DNS、TUN 或策略，未改动的字段保持原值。</p>
+      <label className="source-edit-field"><span>来源名称</span><input aria-label="来源名称" value={editName} onChange={event => setEditName(event.target.value)} /></label>
+      <label className="source-edit-field"><span>订阅地址</span><input aria-label="订阅地址" placeholder="https://…（留空保持当前订阅）" value={editURL} onChange={event => setEditURL(event.target.value)} /></label>
+      {baseline && !baseline.url && <p className="source-edit-note">当前是本地 YAML 来源；填入 HTTPS 地址保存后会改为订阅来源并重新拉取。</p>}
+      <label className="source-edit-field"><span>YAML 内容</span><textarea aria-label="YAML 内容" spellCheck={false} value={editDocument} onChange={event => setEditDocument(event.target.value)} /></label>
+      {baseline?.url && <p className="source-edit-note">修改 YAML 只作为草稿保存；之后点「刷新草稿」会用订阅内容覆盖本地修改。</p>}
+      <div className="dialog-actions">
+        <button type="button" disabled={busy} onClick={closeEdit}>取消</button>
+        <button className="primary" type="button" disabled={busy || !editName.trim()} onClick={() => void saveEdit()}><ActionLabel active={activeAction?.kind === 'save'} idle="保存并重新校验" pending="正在保存…" /></button>
+      </div>
+    </dialog>}
+    {deleting && <dialog className="reload-dialog" open aria-modal="true" aria-labelledby="source-delete-title">
+      <h2 id="source-delete-title">删除配置来源？</h2>
+      {deleting.applied ? <>
+        <p><strong>{deleting.name}</strong> 是网关当前的运行版本，现在不能删除。</p>
+        <ul><li>请先停止网关，再回到本页删除：停止后该来源不再是运行版本，即可删除。</li><li>删除只影响来源库，不会回滚已经应用的配置。</li></ul>
+      </> : <>
+        <p>删除 <strong>{deleting.name}</strong> 会移除它的全部快照文件与保存的订阅链接，此操作不可恢复。</p>
+        <ul>
+          <li>已经应用到网关的配置不受影响。</li>
+          {deleting.desired && <li>它当前是下次启动版本：网关仍按已保存的配置文件启动，但来源库中将不再显示它。</li>}
+        </ul>
+      </>}
+      <div className="dialog-actions">
+        <button type="button" disabled={busy} onClick={() => setDeleting(null)}>{deleting.applied ? '关闭' : '取消'}</button>
+        {!deleting.applied && <button className="danger" type="button" disabled={busy} onClick={() => void removeSource()}><ActionLabel active={activeAction?.kind === 'delete'} idle="确认删除" pending="正在删除…" /></button>}
+      </div>
     </dialog>}
   </>
 }

@@ -263,6 +263,31 @@ type SourceImportRequest struct {
 	URL  string `json:"url"`
 }
 
+// SourceUpdateRequest edits an existing source. Every field is optional: an
+// empty name keeps the current one, an empty URL keeps the current subscription,
+// and an empty document keeps the stored content. A URL that differs from the
+// saved subscription replaces it and is re-fetched; otherwise a document
+// replaces the stored content.
+type SourceUpdateRequest struct {
+	Name     string `json:"name"`
+	URL      string `json:"url"`
+	Document string `json:"document"`
+}
+
+// SourceEditDocument is what the Web UI needs to render the edit form. URL is
+// the saved subscription link and is returned only from this endpoint, because
+// the source list deliberately redacts it.
+type SourceEditDocument struct {
+	SchemaVersion int    `json:"schema_version"`
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	Kind          string `json:"kind"`
+	Origin        string `json:"origin"`
+	Digest        string `json:"digest"`
+	URL           string `json:"url,omitempty"`
+	Document      string `json:"document"`
+}
+
 type SelectionRequest struct {
 	Policy string `json:"policy"`
 }

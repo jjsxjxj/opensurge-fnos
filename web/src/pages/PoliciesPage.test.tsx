@@ -50,6 +50,7 @@ function localRouting(mode: LocalRouting['mode'] = 'rule', selected = 'Proxy-A')
 
 describe('PoliciesPage', () => {
   beforeEach(() => {
+    window.localStorage.clear()
     vi.mocked(api.proxyHealth).mockResolvedValue(health)
     vi.mocked(api.testProxyHealth).mockResolvedValue({ schema_version: 1, test_url: health.test_url, results: [] })
     vi.mocked(api.selectPolicy).mockResolvedValue({} as never)
@@ -65,6 +66,9 @@ describe('PoliciesPage', () => {
 
     expect(await screen.findByRole('heading', { name: 'Main' })).toBeTruthy()
     expect(screen.queryByRole('heading', { name: 'device/alice/default' })).toBeNull()
+    // Groups start collapsed, so node detail only appears after expanding one.
+    expect(screen.queryByText('超时')).toBeNull()
+    await userEvent.click(screen.getByRole('button', { name: '展开' }))
     expect(screen.getAllByText('86 ms').length).toBeGreaterThan(0)
     expect(screen.getByText('超时')).toBeTruthy()
 
@@ -79,9 +83,34 @@ describe('PoliciesPage', () => {
 
   it('tests the probeable nodes in the current view', async () => {
     render(<PoliciesPage overview={overview} onChanged={vi.fn(async () => {})} />)
-    await screen.findAllByText('86 ms')
-    await userEvent.click(screen.getByRole('button', { name: '检测当前视图' }))
+    const button = await screen.findByRole('button', { name: '检测当前视图' })
+    await waitFor(() => expect(button.hasAttribute('disabled')).toBe(false))
+    await userEvent.click(button)
     await waitFor(() => expect(api.testProxyHealth).toHaveBeenCalledWith(['Proxy-A', 'Proxy-B']))
+  })
+
+  it('collapses every policy group by default and remembers the expanded ones', async () => {
+    const { unmount } = render(<PoliciesPage overview={overview} onChanged={vi.fn(async () => {})} />)
+    await screen.findByRole('heading', { name: 'Main' })
+
+    const toggle = screen.getByRole('button', { name: '展开' })
+    expect(toggle.getAttribute('aria-expanded')).toBe('false')
+    expect(screen.queryByRole('button', { name: 'Main 选择 Proxy-A' })).toBeNull()
+
+    await userEvent.click(toggle)
+    expect(toggle.getAttribute('aria-expanded')).toBe('true')
+    expect(screen.getByRole('button', { name: 'Main 选择 Proxy-A' })).toBeTruthy()
+    expect(JSON.parse(window.localStorage.getItem('opensurge.policies.expandedGroups') ?? '[]')).toEqual(['Main'])
+
+    unmount()
+    render(<PoliciesPage overview={overview} onChanged={vi.fn(async () => {})} />)
+    await screen.findByRole('heading', { name: 'Main' })
+    expect(screen.getByRole('button', { name: '收起' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Main 选择 Proxy-A' })).toBeTruthy()
+
+    await userEvent.click(screen.getByRole('button', { name: '收起' }))
+    expect(screen.queryByRole('button', { name: 'Main 选择 Proxy-A' })).toBeNull()
+    expect(JSON.parse(window.localStorage.getItem('opensurge.policies.expandedGroups') ?? '[]')).toEqual([])
   })
 
   it('keeps the Mac global policy group first and switches it through the local-routing API', async () => {

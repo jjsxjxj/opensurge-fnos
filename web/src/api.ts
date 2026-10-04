@@ -1,4 +1,4 @@
-import type { APIError, ConnectivityResponse, ControlConfig, DevicePolicyDocument, DevicesResponse, DeviceTraffic, Diagnostics, GatewayPlan, LocalRouting, LocalRoutingMode, NetworkInterfacesResponse, Operation, Overview, PolicySet, ProxyGroup, ProxyHealthSnapshot, ProxyHealthTestResponse, Source } from './types'
+import type { APIError, ConnectivityResponse, ControlConfig, DevicePolicyDocument, DevicesResponse, DeviceTraffic, Diagnostics, GatewayPlan, LocalRouting, LocalRoutingMode, NetworkInterfacesResponse, Operation, Overview, PolicySet, ProxyGroup, ProxyHealthSnapshot, ProxyHealthTestResponse, Source, SourceEditDocument } from './types'
 
 export class RequestError extends Error {
   constructor(public status: number, public code: string, message: string) {
@@ -64,6 +64,9 @@ export const api = {
   },
   refreshSource: (id: string) => request<Source>(`/api/v1/sources/${id}/refresh`, { method: 'POST' }),
   applySource: (id: string, revision: string) => request<Source>(`/api/v1/sources/${id}/apply`, { method: 'POST', headers: { 'If-Match': `"${revision}"` } }),
+  sourceEdit: (id: string) => request<SourceEditDocument>(`/api/v1/sources/${id}/edit`),
+  updateSource: (id: string, payload: { name: string; url?: string; document?: string }) => request<Source>(`/api/v1/sources/${id}`, { method: 'PUT', body: JSON.stringify(payload) }),
+  deleteSource: (id: string) => request<{ revision: string; sources: Source[] }>(`/api/v1/sources/${id}`, { method: 'DELETE' }),
   devices: () => request<DevicesResponse>('/api/v1/devices'),
   deviceTraffic: () => request<DeviceTraffic>('/api/v1/device-traffic'),
   devicePolicy: () => request<DevicePolicyDocument>('/api/v1/device-policy'),

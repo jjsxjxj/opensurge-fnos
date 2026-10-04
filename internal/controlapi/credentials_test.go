@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -102,4 +103,41 @@ func modePerm(info os.FileInfo) os.FileMode {
 		return 0
 	}
 	return info.Mode().Perm()
+}
+
+func TestFileCredentialStoreDeleteRemovesOnlyTheTargetCredential(t *testing.T) {
+	root := t.TempDir()
+	credentials := NewFileCredentialStore(root)
+	if err := credentials.Put(t.Context(), "source-1", "https://example.com/a?token=secret1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := credentials.Put(t.Context(), "source-2", "https://example.com/b?token=secret2"); err != nil {
+		t.Fatal(err)
+	}
+	if err := credentials.Delete(t.Context(), "source-1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := credentials.Get(t.Context(), "source-1"); err == nil {
+		t.Fatal("deleted credential is still readable")
+	}
+	if value, err := credentials.Get(t.Context(), "source-2"); err != nil || value != "https://example.com/b?token=secret2" {
+		t.Fatalf("credential=%q err=%v", value, err)
+	}
+	raw, err := os.ReadFile(filepath.Join(root, "credentials", "sources.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "secret1") {
+		t.Fatalf("deleted secret remains in the credential file: %s", raw)
+	}
+}
+
+func TestFileCredentialStoreDeleteRejectsEmptyIDAndToleratesMissingEntry(t *testing.T) {
+	credentials := NewFileCredentialStore(t.TempDir())
+	if err := credentials.Delete(t.Context(), "source-1"); err != nil {
+		t.Fatalf("deleting an absent credential must not fail: %v", err)
+	}
+	if err := credentials.Delete(t.Context(), ""); err == nil {
+		t.Fatal("deleting an empty credential id must fail")
+	}
 }
